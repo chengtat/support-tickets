@@ -13,7 +13,7 @@ st.write(
     """
     This app shows how you can build an internal tool in Streamlit. Here, we are 
     implementing a support ticket workflow. The user can create a ticket, edit 
-    existing tickets, and view some statistics.
+    existing tickets, delete tickets, and view some statistics.
     """
 )
 
@@ -60,26 +60,21 @@ if "df" not in st.session_state:
     }
     df = pd.DataFrame(data)
 
-    # Save the dataframe in session state (a dictionary-like object that persists across
-    # page runs). This ensures our data is persisted when the app updates.
+    # Save the dataframe in session state.
     st.session_state.df = df
 
 
 # Show a section to add a new ticket.
 st.header("Add a ticket")
 
-# We're adding tickets via an `st.form` and some input widgets. If widgets are used
-# in a form, the app will only rerun once the submit button is pressed.
 with st.form("add_ticket_form"):
     issue = st.text_area("Describe the issue")
     priority = st.selectbox("Priority", ["High", "Medium", "Low"])
     submitted = st.form_submit_button("Submit")
 
 if submitted:
-    # Make a dataframe for the new ticket and append it to the dataframe in session
-    # state.
-    recent_ticket_number = int(max(st.session_state.df.ID).split("-")[1])
-    today = datetime.datetime.now().strftime("%m-%d-%Y")
+    recent_ticket_number = int(max(st.session_state.df.ID).split("-")[1]) if len(st.session_state.df) > 0 else 1000
+    today = datetime.date.today()
     df_new = pd.DataFrame(
         [
             {
@@ -92,27 +87,26 @@ if submitted:
         ]
     )
 
-    # Show a little success message.
     st.write("Ticket submitted! Here are the ticket details:")
     st.dataframe(df_new, use_container_width=True, hide_index=True)
-    st.session_state.df = pd.concat([df_new, st.session_state.df], axis=0)
+    st.session_state.df = pd.concat([df_new, st.session_state.df], axis=0).reset_index(drop=True)
 
-# Show section to view and edit existing tickets in a table.
+# Show section to view, edit, and delete existing tickets.
 st.header("Existing tickets")
 st.write(f"Number of tickets: `{len(st.session_state.df)}`")
 
 st.info(
-    "You can edit the tickets by double clicking on a cell. Note how the plots below "
-    "update automatically! You can also sort the table by clicking on the column headers.",
+    "You can edit cells by double clicking. Select rows and press Backspace/Delete "
+    "or use the delete icon to remove tickets directly from the table.",
     icon="✍️",
 )
 
-# Show the tickets dataframe with `st.data_editor`. This lets the user edit the table
-# cells. The edited data is returned as a new dataframe.
+# Show the tickets dataframe with `st.data_editor`.
 edited_df = st.data_editor(
     st.session_state.df,
     use_container_width=True,
     hide_index=True,
+    num_rows="dynamic",  # Allows deleting and inserting rows directly in the editor table
     column_config={
         "Status": st.column_config.SelectboxColumn(
             "Status",
@@ -127,14 +121,30 @@ edited_df = st.data_editor(
             required=True,
         ),
     },
-    # Disable editing the ID and Date Submitted columns.
     disabled=["ID", "Date Submitted"],
 )
+
+# Update session state with edits/deletions made inside data_editor
+st.session_state.df = edited_df
+
+# Dedicated section to explicitly select and delete a ticket
+with st.expander("🗑️ Delete a ticket by ID"):
+    ticket_ids = st.session_state.df["ID"].tolist() if not st.session_state.df.empty else []
+    if ticket_ids:
+        ticket_to_delete = st.selectbox("Select Ticket ID to delete", options=ticket_ids)
+        if st.button("Delete Selected Ticket", type="primary"):
+            st.session_state.df = st.session_state.df[
+                st.session_state.df["ID"] != ticket_to_delete
+            ].reset_index(drop=True)
+            st.success(f"{ticket_to_delete} has been deleted.")
+            st.rerun()
+    else:
+        st.info("No tickets available to delete.")
+
 
 # Show some metrics and charts about the ticket.
 st.header("Statistics")
 
-# Show metrics side by side using `st.columns` and `st.metric`.
 col1, col2, col3 = st.columns(3)
 num_open_tickets = len(st.session_state.df[st.session_state.df.Status == "Open"])
 col1.metric(label="Number of open tickets", value=num_open_tickets, delta=10)
@@ -144,29 +154,32 @@ col3.metric(label="Average resolution time (hours)", value=16, delta=2)
 # Show two Altair charts using `st.altair_chart`.
 st.write("")
 st.write("##### Ticket status per month")
-status_plot = (
-    alt.Chart(edited_df)
-    .mark_bar()
-    .encode(
-        x="month(Date Submitted):O",
-        y="count():Q",
-        xOffset="Status:N",
-        color="Status:N",
+if not edited_df.empty:
+    status_plot = (
+        alt.Chart(edited_df)
+        .mark_bar()
+        .encode(
+            x="month(Date Submitted):O",
+            y="count():Q",
+            xOffset="Status:N",
+            color="Status:N",
+        )
+        .configure_legend(
+            orient="bottom", titleFontSize=14, labelFontSize=14, titlePadding=5
+        )
     )
-    .configure_legend(
-        orient="bottom", titleFontSize=14, labelFontSize=14, titlePadding=5
-    )
-)
-st.altair_chart(status_plot, use_container_width=True, theme="streamlit")
+    st.altair_chart(status_plot, use_container_width=True, theme="streamlit")
 
-st.write("##### Current ticket priorities")
-priority_plot = (
-    alt.Chart(edited_df)
-    .mark_arc()
-    .encode(theta="count():Q", color="Priority:N")
-    .properties(height=300)
-    .configure_legend(
-        orient="bottom", titleFontSize=14, labelFontSize=14, titlePadding=5
+    st.write("##### Current ticket priorities")
+    priority_plot = (
+        alt.Chart(edited_df)
+        .mark_arc()
+        .encode(theta="count():Q", color="Priority:N")
+        .properties(height=300)
+        .configure_legend(
+            orient="bottom", titleFontSize=14, labelFontSize=14, titlePadding=5
+        )
     )
-)
-st.altair_chart(priority_plot, use_container_width=True, theme="streamlit")
+    st.altair_chart(priority_plot, use_container_width=True, theme="streamlit")
+else:
+    st.info("No ticket data available to render charts.")
