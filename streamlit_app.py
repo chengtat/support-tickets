@@ -14,7 +14,7 @@ st.write(
     This app shows how you can build an internal tool in Streamlit. Here, we are 
     implementing a support ticket workflow. The user can create a ticket, edit 
     existing tickets, delete tickets, assign team members, manage issue types, 
-    mark completion dates, and view statistics.
+    mark completion dates, view statistics, and export CSV reports.
     """
 )
 
@@ -40,12 +40,44 @@ if "issue_types" not in st.session_state:
     ]
 
 
-# --- SIDEBAR: MANAGEMENT PANELS ---
+# --- SIDEBAR: MANAGEMENT PANELS & CSV EXPORT ---
 with st.sidebar:
     st.header("⚙️ App Settings")
 
+    # --- CSV REPORT EXPORT SECTION ---
+    with st.expander("📥 Export CSV Report", expanded=True):
+        st.write("Download filtered or full ticket records.")
+        
+        status_filter = st.multiselect(
+            "Filter Status for Export",
+            options=["Open", "In Progress", "Closed"],
+            default=["Open", "In Progress", "Closed"],
+        )
+
+        if "df" in st.session_state and not st.session_state.df.empty:
+            # Filter dataframe based on user selection
+            filtered_df_export = st.session_state.df[
+                st.session_state.df["Status"].isin(status_filter)
+            ]
+
+            # Convert dataframe to CSV byte stream
+            csv_data = filtered_df_export.to_csv(index=False).encode("utf-8")
+
+            today_str = datetime.date.today().strftime("%Y-%m-%d")
+            st.download_button(
+                label="⬇️ Download CSV Report",
+                data=csv_data,
+                file_name=f"support_tickets_report_{today_str}.csv",
+                mime="text/csv",
+                type="primary",
+                use_container_width=True,
+            )
+            st.caption(f"Exporting `{len(filtered_df_export)}` records")
+        else:
+            st.info("No ticket data available to export.")
+
     # --- TEAM MEMBER MANAGEMENT ---
-    with st.expander("👤 Team Management", expanded=True):
+    with st.expander("👤 Team Management", expanded=False):
         # Form to add a new team member
         with st.form("add_team_member_form", clear_on_submit=True):
             new_member = st.text_input("Add team member")
@@ -91,7 +123,7 @@ with st.sidebar:
             st.info("No custom members to remove.")
 
     # --- ISSUE TYPE MANAGEMENT ---
-    with st.expander("🏷️ Issue Types Management", expanded=True):
+    with st.expander("🏷️ Issue Types Management", expanded=False):
         # Form to add a new issue type
         with st.form("add_issue_type_form", clear_on_submit=True):
             new_type = st.text_input("Add issue type")
