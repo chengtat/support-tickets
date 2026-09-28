@@ -1,5 +1,349 @@
 import datetime
 import random
+import sqlite3
+
+import altair as alt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Support Tickets Manager", page_icon="🎫", layout="wide")
+st.title("🎫 Support Tickets Manager")
+st.write(
+    """
+    An enhanced Streamlit support ticket management dashboard backed by SQLite for 
+    persistent storage, automated metrics, dynamic charting, and CSV reporting.
+    """
+)
+
+DB_FILE = "tickets.db"
+
+
+def get_db_connection():
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tickets (
+            ID TEXT PRIMARY KEY,
+            Issue TEXT,
+            Issue_Type TEXT,
+            Status TEXT,
+            Priority TEXT,
+            Assigned_To TEXT,
+            Date_Submitted TEXT,
+            Completed_Date TEXT
+        )
+    """)
+    cursor.execute("CREATE TABLE IF NOT EXISTS team_members (name TEXT PRIMARY KEY)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS issue_types (name TEXT PRIMARY KEY)")
+    conn.commit()
+
+    # Seed team members if empty
+    cursor.execute("SELECT COUNT(*) FROM team_members")
+    if cursor.fetchone()[0] == 0:
+        default_members = [
+            ("Alice Johnson",),
+            ("Bob Smith",),
+            ("Charlie Brown",),
+            ("Diana Prince",),
+            ("Unassigned",),
+        ]
+        cursor.executemany("INSERT INTO team_members VALUES (?)", default_members)
+
+    # Seed issue types if empty
+    cursor.execute("SELECT COUNT(*) FROM issue_types")
+    if cursor.fetchone()[0] == 0:
+        default_types = [
+            ("Hardware",),
+            ("Software",),
+            ("Network",),
+            ("Security",),
+            ("Access & Credentials",),
+            ("General IT",),
+        ]
+        cursor.executemany("INSERT INTO issue_types VALUES (?)", default_types)
+
+    # Seed initial tickets if empty
+    cursor.execute("SELECT COUNT(*) FROM tickets")
+    if cursor.fetchone()[0] == 0:
+        np.random.seed(42)
+        descriptions = [
+            "Network connectivity issues in the office",
+            "Software application crashing on startup",
+            "Printer not responding to print commands",
+            "Email server downtime",
+            "Data backup failure",
+            "Login authentication problems",
+            "VPN connection problems for remote employees",
+        ]
+        members = ["Alice Johnson", "Bob Smith", "Charlie Brown", "Diana Prince", "Unassigned"]
+        types = ["Hardware", "Software", "Network", "Security", "Access & Credentials", "General IT"]
+
+        sample_data = []
+        for i in range(1100, 1000, -1):
+            status = np.random.choice(["Open", "In Progress", "Closed"])
+            date_submitted = datetime.date(2023, 6, 1) + datetime.timedelta(days=random.randint(0, 120))
+            completed_date = (date_submitted + datetime.timedelta(days=random.randint(1, 14))) if status == "Closed" else None
+
+            sample_data.append((
+                f"TICKET-{i}",
+                np.random.choice(descriptions),
+                np.random.choice(types),
+                status,
+                np.random.choice(["High", "Medium", "Low"]),
+                np.random.choice(members),
+                str(date_submitted),
+                str(completed_date) if completed_date else None,
+            ))
+        cursor.executemany("INSERT INTO tickets VALUES (?,?,?,?,?,?,?,?)", sample_data)
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+def load_data():
+    conn = get_db_connection()
+    df = pd.read_sql_query(
+        """
+        SELECT 
+            ID, 
+            Issue, 
+            Issue_Type as "Issue Type", 
+            Status, 
+            Priority, 
+            Assigned_To as "Assigned To", 
+            Date_Submitted as "Date Submitted", 
+            Completed_Date as "Completed Date" 
+        FROM tickets
+    """,
+        conn,
+    )
+    team_members = pd.read_sql_query("SELECT name FROM team_members", conn)["name"].tolist()
+    issue_types = pd.read_sql_query("SELECT name FROM issue_types", conn)["name"].tolist()
+    conn.close()
+
+    # Cast date columns
+    df["Date Submitted"] = pd.to_datetime(df["Date Submitted"]).dt.date
+    df["Completed Date"] = pd.to_datetime(df["Completed Date"]).dt.date
+    return df, team_members, issue_types
+
+
+# Sync DB with Streamlit State
+df, team_members, issue_types = load_data()
+st.session_state.df = df
+st.session_state.team_members = team_members
+st.session_state.issue_types = issue_types
+
+
+# --- SIDEBAR SETTINGS ---
+with st.sidebar:
+    st.header("⚙️ Settings & Management")
+
+    with st.expander("📥 Export CSV Report", expanded=True):
+        status_filter = st.multiselect(
+            "Filter Status for Export",
+            options=["Open", "In Progress", "Closed"],
+            default=["Open", "In Progress", "Closed"],
+        )
+
+        if not st.session_state.df.empty:
+            filtered_df = st.session_state.df[st.session_state.df["Status"].isin(status_filter)]
+            csv_data = filtered_df.to_csv(index=False).encode("utf-8")
+            today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+            st.download_button(
+                label="⬇️ Download CSV Report",
+                data=csv_data,
+                file_name=f"support_tickets_{today_str}.csv",
+                mime="text/csv",
+                type="primary",
+                use_container_width=True,
+            )
+            st.caption(f"Exporting `{len(filtered_df)}` records")
+
+    with st.expander("👤 Team Management", expanded=False):
+        with st.form("add_member_form", clear_on_submit=True):
+            new_member = st.text_input("New Member Name")
+            if st.form_submit_button("Add Member"):
+                cleaned = new_member.strip()
+                if cleaned and cleaned not in st.session_state.team_members:
+                    conn = get_db_connection()
+                    conn.execute("INSERT INTO team_members VALUES (?)", (cleaned,))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Added {cleaned}")
+                    st.rerun()
+
+        st.divider()
+        removable_members = [m for m in st.session_state.team_members if m != "Unassigned"]
+        if removable_members:
+            to_remove = st.selectbox("Remove Member", options=removable_members)
+            if st.button("Remove Selected Member"):
+                conn = get_db_connection()
+                conn.execute("DELETE FROM team_members WHERE name = ?", (to_remove,))
+                conn.execute("UPDATE tickets SET Assigned_To = 'Unassigned' WHERE Assigned_To = ?", (to_remove,))
+                conn.commit()
+                conn.close()
+                st.success(f"Removed {to_remove}")
+                st.rerun()
+
+    with st.expander("🏷️ Issue Types Management", expanded=False):
+        with st.form("add_type_form", clear_on_submit=True):
+            new_type = st.text_input("New Issue Category")
+            if st.form_submit_button("Add Category"):
+                cleaned = new_type.strip()
+                if cleaned and cleaned not in st.session_state.issue_types:
+                    conn = get_db_connection()
+                    conn.execute("INSERT INTO issue_types VALUES (?)", (cleaned,))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Added {cleaned}")
+                    st.rerun()
+
+
+# --- CREATE TICKET SECTION ---
+st.header("➕ Create New Ticket")
+
+with st.form("add_ticket_form", clear_on_submit=True):
+    issue_desc = st.text_area("Issue Description", placeholder="Describe the problem in detail...")
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+        selected_type = st.selectbox("Issue Category", st.session_state.issue_types)
+    with col_b:
+        selected_priority = st.selectbox("Priority", ["High", "Medium", "Low"], index=1)
+    with col_c:
+        default_idx = st.session_state.team_members.index("Unassigned") if "Unassigned" in st.session_state.team_members else 0
+        selected_assignee = st.selectbox("Assign To", st.session_state.team_members, index=default_idx)
+
+    submitted = st.form_submit_button("Submit Ticket", type="primary")
+
+if submitted:
+    if not issue_desc.strip():
+        st.error("Please enter a valid issue description before submitting.")
+    else:
+        recent_num = (
+            int(max(st.session_state.df["ID"]).split("-")[1])
+            if not st.session_state.df.empty
+            else 1000
+        )
+        new_id = f"TICKET-{recent_num + 1}"
+        today_str = str(datetime.date.today())
+
+        conn = get_db_connection()
+        conn.execute(
+            "INSERT INTO tickets VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (new_id, issue_desc.strip(), selected_type, "Open", selected_priority, selected_assignee, today_str, None),
+        )
+        conn.commit()
+        conn.close()
+
+        st.success(f"Ticket `{new_id}` submitted successfully!")
+        st.rerun()
+
+
+# --- TICKET TABLE SECTION ---
+st.header("📋 Existing Tickets")
+st.caption(f"Total Records: `{len(st.session_state.df)}`")
+
+edited_df = st.data_editor(
+    st.session_state.df,
+    use_container_width=True,
+    hide_index=True,
+    num_rows="dynamic",
+    column_config={
+        "Issue Type": st.column_config.SelectboxColumn("Issue Type", options=st.session_state.issue_types, required=True),
+        "Status": st.column_config.SelectboxColumn("Status", options=["Open", "In Progress", "Closed"], required=True),
+        "Priority": st.column_config.SelectboxColumn("Priority", options=["High", "Medium", "Low"], required=True),
+        "Assigned To": st.column_config.SelectboxColumn("Assigned To", options=st.session_state.team_members, required=True),
+        "Completed Date": st.column_config.DateColumn("Completed Date", format="YYYY-MM-DD"),
+        "Date Submitted": st.column_config.DateColumn("Date Submitted", format="YYYY-MM-DD"),
+    },
+    disabled=["ID", "Date Submitted"],
+    key="ticket_editor",
+)
+
+# Persist updates made directly inside st.data_editor back to SQLite
+if not edited_df.equals(st.session_state.df):
+    conn = get_db_connection()
+    save_df = edited_df.rename(columns={
+        "Issue Type": "Issue_Type",
+        "Assigned To": "Assigned_To",
+        "Date Submitted": "Date_Submitted",
+        "Completed Date": "Completed_Date",
+    })
+    save_df.to_sql("tickets", conn, if_exists="replace", index=False)
+    conn.close()
+    st.session_state.df = edited_df
+    st.rerun()
+
+
+# --- DASHBOARD METRICS & ANALYTICS ---
+st.header("📊 Statistics & Insights")
+
+if not st.session_state.df.empty:
+    df_calc = st.session_state.df.copy()
+
+    # Calculate real SLA metrics from available date data
+    df_calc["Date Submitted"] = pd.to_datetime(df_calc["Date Submitted"])
+    df_calc["Completed Date"] = pd.to_datetime(df_calc["Completed Date"])
+
+    closed_mask = df_calc["Status"] == "Closed"
+    df_closed = df_calc[closed_mask & df_calc["Completed Date"].notnull()]
+
+    if not df_closed.empty:
+        avg_res_days = (df_closed["Completed Date"] - df_closed["Date Submitted"]).dt.days.mean()
+        avg_res_str = f"{avg_res_days:.1f} days"
+    else:
+        avg_res_str = "N/A"
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Open Tickets", len(df_calc[df_calc["Status"] == "Open"]))
+    col2.metric("In Progress", len(df_calc[df_calc["Status"] == "In Progress"]))
+    col3.metric("Closed Tickets", len(df_calc[df_calc["Status"] == "Closed"]))
+    col4.metric("Avg Resolution Time", avg_res_str)
+
+    st.write("")
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.write("##### Priority Distribution")
+        priority_chart = (
+            alt.Chart(df_calc)
+            .mark_arc(innerRadius=50)
+            .encode(
+                theta="count():Q",
+                color=alt.Color("Priority:N", scale=alt.Scale(domain=["High", "Medium", "Low"], range=["#e74c3c", "#f39c12", "#2ecc71"])),
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(priority_chart, use_container_width=True)
+
+    with col_chart2:
+        st.write("##### Workload by Assignee & Status")
+        assignee_chart = (
+            alt.Chart(df_calc)
+            .mark_bar()
+            .encode(
+                x="count():Q",
+                y=alt.Y("Assigned To:N", sort="-x"),
+                color="Status:N",
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(assignee_chart, use_container_width=True)
+else:
+    st.info("No tickets available to render analytics.")import datetime
+import random
 
 import altair as alt
 import numpy as np
